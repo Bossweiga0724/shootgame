@@ -11,7 +11,8 @@ import {
 const App: React.FC = () => {
   const [gameState, setGameState] = useState<GameState>(() => {
     const savedLevels = localStorage.getItem('unlockedLevels');
-    const savedAchs = localStorage.getItem('achievements_v3');
+    const savedCleared = localStorage.getItem('clearedLevels');
+    const savedAchs = localStorage.getItem('achievements_v4');
     return {
       player: {
         id: 'player', x: MAP_SIZE / 2, y: MAP_SIZE / 2, hp: 100, maxHp: 100, speed: 4, radius: 15, color: '#3b82f6',
@@ -22,14 +23,18 @@ const App: React.FC = () => {
       enemies: [], bullets: [], items: [], warnings: [], skillEffects: [],
       score: 0, wave: 1, progress: 0, isGameOver: false, isVictory: false, bossMode: false,
       targetPos: { x: MAP_SIZE / 2, y: MAP_SIZE / 2 }, gameStarted: false, selectingCharacter: false, selectingLevel: true,
-      currentLevel: 1, unlockedLevels: savedLevels ? JSON.parse(savedLevels) : [1],
+      currentLevel: 1, 
+      unlockedLevels: savedLevels ? JSON.parse(savedLevels) : [1],
+      clearedLevels: savedCleared ? JSON.parse(savedCleared) : [],
       achievements: savedAchs ? JSON.parse(savedAchs) : INITIAL_ACHIEVEMENTS,
+      shakeTime: 0,
     };
   });
 
   const lastShootTimeRef = useRef<number>(0);
   const lastSpawnTimeRef = useRef<number>(0);
   const lastBossAttackTimeRef = useRef<number>(0);
+  const lastOrbitalStrikeTimeRef = useRef<number>(0);
   const killCountRef = useRef<number>(0);
   const keysPressed = useRef<Record<string, boolean>>({});
 
@@ -38,7 +43,7 @@ const App: React.FC = () => {
       const ach = prev.achievements.find(a => a.id === id);
       if (ach && !ach.unlocked) {
         const newAchs = prev.achievements.map(a => a.id === id ? { ...a, unlocked: true } : a);
-        localStorage.setItem('achievements_v3', JSON.stringify(newAchs));
+        localStorage.setItem('achievements_v4', JSON.stringify(newAchs));
         return { ...prev, achievements: newAchs, recentAchievement: ach.title };
       }
       return prev;
@@ -86,7 +91,7 @@ const App: React.FC = () => {
 
   const spawnEnemies = useCallback(() => {
     setGameState(prev => {
-      if (!prev.gameStarted || prev.isGameOver || prev.isVictory || prev.progress >= 100) return prev;
+      if (!prev.gameStarted || prev.isGameOver || prev.isVictory || prev.progress >= 100 || prev.bossMode) return prev;
       if (prev.enemies.length >= MAX_ENEMIES_ON_SCREEN) return prev;
 
       const now = Date.now();
@@ -157,26 +162,63 @@ const App: React.FC = () => {
         return { ...fx, radius: fx.maxRadius * ((now - fx.startTime) / fx.duration) };
       }).filter(fx => now - fx.startTime < fx.duration);
 
-      let bossMode = prev.bossMode;
-      if (prev.currentLevel === 5 && prev.progress >= 60 && !bossMode) {
-        bossMode = true;
-        const mega = { id: 'mega_boss', x: 200, y: 200, hp: ENEMY_CONFIG[EnemyType.MEGA_BOSS].hp, maxHp: ENEMY_CONFIG[EnemyType.MEGA_BOSS].hp, speed: 0, radius: 400, color: '#fff', type: EnemyType.MEGA_BOSS, lastAttackTime: 0 };
-        prev.enemies.push(mega);
+      if (prev.clearedLevels.includes(prev.currentLevel) && now - lastOrbitalStrikeTimeRef.current > 3000) {
+        lastOrbitalStrikeTimeRef.current = now;
+        newSkillEffects.push({
+          id: 'orbital_' + now, x: MAP_SIZE / 2, y: MAP_SIZE / 2, type: 'ORBITAL_STRIKE',
+          radius: MAP_SIZE * 1.5, maxRadius: MAP_SIZE * 1.5, color: 'rgba(255, 255, 255, 0.4)',
+          startTime: now, duration: 600, damage: 200
+        });
       }
 
-      let newBullets = [...prev.bullets];
-      const megaBoss = prev.enemies.find(e => e.type === EnemyType.MEGA_BOSS);
-      if (megaBoss && now - lastBossAttackTimeRef.current > 2000) {
+      let bossMode = prev.bossMode;
+      let shakeTime = Math.max(0, prev.shakeTime - 16.6);
+      let activeEnemies = [...prev.enemies];
+      let activeWarnings = [...prev.warnings];
+      let activeBullets = [...prev.bullets];
+
+      // 触发 Boss 逻辑
+      const isFinalLevel = prev.currentLevel === 5;
+      const spawnBossAt = isFinalLevel ? 60 : 95;
+      if (prev.progress >= spawnBossAt && !bossMode) {
+        bossMode = true;
+        // 只有最后一关 Boss 出现时会有大震动
+        if (isFinalLevel) shakeTime = 2000; 
+        
+        activeEnemies = [];
+        activeWarnings = [];
+        activeBullets = activeBullets.filter(b => !b.isEnemy);
+        
+        const bossType = isFinalLevel ? EnemyType.MEGA_BOSS : EnemyType.BOSS;
+        const cfg = ENEMY_CONFIG[bossType];
+        const levelMul = LEVELS.find(l => l.id === prev.currentLevel)?.multiplier || 1;
+        
+        activeEnemies.push({ 
+          id: 'level_boss', 
+          x: MAP_SIZE/4, 
+          y: MAP_SIZE/4, 
+          hp: cfg.hp * levelMul, 
+          maxHp: cfg.hp * levelMul, 
+          speed: bossType === EnemyType.MEGA_BOSS ? 0 : ENEMY_SPEED_BASE * 0.8, 
+          radius: cfg.radius, 
+          color: cfg.color, 
+          type: bossType, 
+          lastAttackTime: 0 
+        });
+      }
+
+      const currentBoss = activeEnemies.find(e => e.type === EnemyType.MEGA_BOSS || e.type === EnemyType.BOSS);
+      if (bossMode && currentBoss && now - lastBossAttackTimeRef.current > (currentBoss.type === EnemyType.MEGA_BOSS ? 1800 : 2500)) {
         lastBossAttackTimeRef.current = now;
-        if (Math.random() > 0.4) {
-          for(let i=0; i<20; i++) newBullets.push({ id: Math.random().toString(), x: megaBoss.x, y: megaBoss.y, angle: (i/20)*Math.PI*2, damage: 20, speed: 2.0, color: '#f00', life: 1000, size: 25, isEnemy: true });
-        } else {
-          const safeRow = Math.floor(Math.random() * ROW_COUNT);
-          for(let r=0; r<ROW_COUNT; r++) {
-            if (r !== safeRow) {
-               newSkillEffects.push({ id: 'danger_'+r+'_'+now, x: 0, y: 0, type: 'DANGER_ROW', radius: 0, maxRadius: 0, color: 'rgba(255,0,0,0.5)', startTime: now, duration: 3000, damage: 2, rowId: r });
-            }
-          }
+        // 只有 MEGA_BOSS 和普通 BOSS 触发特定弹幕
+        const count = currentBoss.type === EnemyType.MEGA_BOSS ? 36 : 12;
+        for(let i=0; i<count; i++) {
+          activeBullets.push({ 
+            id: 'boss_bullet_' + now + '_' + i, 
+            x: currentBoss.x, y: currentBoss.y, 
+            angle: (i/count)*Math.PI*2, 
+            damage: 20, speed: 2.2, color: '#ff0044', life: 1000, size: currentBoss.type === EnemyType.MEGA_BOSS ? 25 : 15, isEnemy: true 
+          });
         }
       }
 
@@ -188,7 +230,7 @@ const App: React.FC = () => {
       });
 
       const enemiesFromWarnings: Enemy[] = [];
-      const remainingWarnings = prev.warnings.filter(w => {
+      const remainingWarnings = activeWarnings.filter(w => {
         if (now - w.startTime >= w.duration) {
           const cfg = ENEMY_CONFIG[w.type];
           const levelMul = LEVELS.find(l => l.id === prev.currentLevel)?.multiplier || 1;
@@ -198,7 +240,7 @@ const App: React.FC = () => {
         return true;
       });
 
-      const activeEnemies = [...prev.enemies, ...enemiesFromWarnings].map(e => {
+      const updatedEnemies = [...activeEnemies, ...enemiesFromWarnings].map(e => {
         let updated = { ...e };
         if (e.type !== EnemyType.MEGA_BOSS) {
           const de = Math.sqrt((newPlayer.x-e.x)**2 + (newPlayer.y-e.y)**2);
@@ -215,7 +257,7 @@ const App: React.FC = () => {
         newSkillEffects.forEach(fx => {
           if (fx.type === 'DANGER_ROW') return;
           const dist = Math.sqrt((updated.x-fx.x)**2 + (updated.y-fx.y)**2);
-          if (dist < fx.radius + e.radius) updated.hp -= (fx.damage/30);
+          if (dist < (fx.type === 'ORBITAL_STRIKE' ? fx.radius : fx.radius + e.radius)) updated.hp -= (fx.damage/30);
         });
         return updated;
       });
@@ -223,19 +265,19 @@ const App: React.FC = () => {
       if (now - lastShootTimeRef.current > (WEAPON_CONFIG[newPlayer.weaponType].cooldown / newPlayer.fireRateModifier)) {
         if (newPlayer.godMode) {
           for(let i=0; i<24; i++) {
-            newBullets.push({ id: Math.random().toString(), x: newPlayer.x, y: newPlayer.y, angle: (i/24)*Math.PI*2, damage: 100, speed: BULLET_SPEED, color: '#fbbf24', life: 100, size: 15 });
+            activeBullets.push({ id: Math.random().toString(), x: newPlayer.x, y: newPlayer.y, angle: (i/24)*Math.PI*2, damage: 100, speed: BULLET_SPEED, color: '#fbbf24', life: 100, size: 15 });
           }
           lastShootTimeRef.current = now;
         } else {
           let target: Enemy | null = null, minDist = SHOOT_RANGE;
-          activeEnemies.forEach(e => {
+          updatedEnemies.forEach(e => {
             const de = Math.sqrt((e.x-newPlayer.x)**2 + (newPlayer.y-newPlayer.y)**2);
             if (de < minDist) { minDist = de; target = e; }
           });
           if (target) {
             const a = Math.atan2(target.y-newPlayer.y, target.x-newPlayer.x);
             const w = WEAPON_CONFIG[newPlayer.weaponType];
-            for(let i=0; i<w.bulletCount; i++) newBullets.push({ id: Math.random().toString(), x: newPlayer.x, y: newPlayer.y, angle: a+(Math.random()-0.5)*w.spread, damage: w.damage, speed: BULLET_SPEED, color: w.color, life: 100 });
+            for(let i=0; i<w.bulletCount; i++) activeBullets.push({ id: Math.random().toString(), x: newPlayer.x, y: newPlayer.y, angle: a+(Math.random()-0.5)*w.spread, damage: w.damage, speed: BULLET_SPEED, color: w.color, life: 100 });
             lastShootTimeRef.current = now;
           }
         }
@@ -243,8 +285,9 @@ const App: React.FC = () => {
 
       const finalEnemies: Enemy[] = [];
       let kills = 0;
-      activeEnemies.forEach(e => {
-        newBullets = newBullets.filter(b => {
+      let bossDied = false;
+      updatedEnemies.forEach(e => {
+        activeBullets = activeBullets.filter(b => {
           if (b.isEnemy) {
             const dp = Math.sqrt((b.x-newPlayer.x)**2 + (b.y-newPlayer.y)**2);
             if (dp < newPlayer.radius + 15) { if(!newPlayer.godMode) newPlayer.hp -= b.damage; return false; }
@@ -256,24 +299,28 @@ const App: React.FC = () => {
         });
         if (e.hp <= 0) {
           kills++;
-          if (e.type === EnemyType.MEGA_BOSS) checkAchievement('mega_slayer');
-          if (e.type === EnemyType.ELITE) checkAchievement('elite_hunter');
+          if (e.type === EnemyType.MEGA_BOSS || e.type === EnemyType.BOSS) {
+            if (bossMode) bossDied = true;
+            if (e.type === EnemyType.MEGA_BOSS) checkAchievement('mega_slayer');
+            checkAchievement('elite_hunter');
+          }
         } else finalEnemies.push(e);
       });
       killCountRef.current += kills;
       if (killCountRef.current >= 50) checkAchievement('kills_50');
 
-      newBullets = newBullets.map(b => ({ ...b, x: b.x + Math.cos(b.angle)*b.speed, y: b.y + Math.sin(b.angle)*b.speed, life: b.life-1 })).filter(b => b.life > 0);
-      const progress = Math.min(100, prev.progress + (kills * 1.8));
-      const isVictory = progress >= 100 && !finalEnemies.find(e => e.type === EnemyType.MEGA_BOSS);
-
-      if (isVictory) {
-        checkAchievement('level_clear');
-      }
+      let nextBullets = activeBullets.map(b => ({ ...b, x: b.x + Math.cos(b.angle)*b.speed, y: b.y + Math.sin(b.angle)*b.speed, life: b.life-1 })).filter(b => b.life > 0);
+      let nextProgress = Math.min(100, prev.progress + (kills * 1.8));
+      
+      // 只要 Boss 死了，就判定该关通关
+      if (bossDied) nextProgress = 100;
+      
+      const isVictory = nextProgress >= 100 && !finalEnemies.find(e => e.type === EnemyType.MEGA_BOSS || e.type === EnemyType.BOSS);
+      if (isVictory) checkAchievement('level_clear');
 
       return {
-        ...prev, player: newPlayer, enemies: finalEnemies, bullets: newBullets, warnings: remainingWarnings, skillEffects: newSkillEffects,
-        score: prev.score + kills*50, progress, wave: Math.min(10, Math.floor(progress/10)+1), isGameOver: newPlayer.hp <= 0, isVictory, bossMode
+        ...prev, player: newPlayer, enemies: finalEnemies, bullets: nextBullets, warnings: remainingWarnings, skillEffects: newSkillEffects,
+        score: prev.score + kills*50, progress: nextProgress, wave: Math.min(10, Math.floor(nextProgress/10)+1), isGameOver: newPlayer.hp <= 0, isVictory, bossMode, shakeTime
       };
     });
     spawnEnemies();
@@ -282,8 +329,9 @@ const App: React.FC = () => {
 
   useEffect(() => { requestAnimationFrame(gameLoop); }, [gameLoop]);
 
-  const onSelectLevel = (id: number) => setGameState(s => ({ ...s, currentLevel: id, selectingLevel: false, selectingCharacter: true }));
-  const onSelectCharacter = (type: CharacterType, godMode: boolean) => {
+  const onSelectLevel = useCallback((id: number) => setGameState(s => ({ ...s, currentLevel: id, selectingLevel: false, selectingCharacter: true })), []);
+  
+  const onSelectCharacter = useCallback((type: CharacterType, godMode: boolean) => {
     const cfg = CHARACTER_CONFIG[type];
     setGameState(s => ({
       ...s, selectingCharacter: false, selectingLevel: false, gameStarted: true, score: 0, progress: 0, wave: 1, bossMode: false, isGameOver: false, isVictory: false,
@@ -292,20 +340,24 @@ const App: React.FC = () => {
     }));
     killCountRef.current = 0;
     lastSpawnTimeRef.current = Date.now();
-  };
+    lastOrbitalStrikeTimeRef.current = Date.now();
+  }, []);
 
-  const backToMenu = () => {
+  const backToMenu = useCallback(() => {
     setGameState(s => {
-      let nextUnlocked = s.unlockedLevels;
-      // 如果当前是胜利状态，解锁下一关
+      let nextUnlocked = [...s.unlockedLevels];
+      let nextCleared = [...s.clearedLevels];
       if (s.isVictory) {
         const nextLevelId = s.currentLevel + 1;
         if (nextLevelId <= LEVELS.length && !nextUnlocked.includes(nextLevelId)) {
-          nextUnlocked = [...nextUnlocked, nextLevelId];
-          localStorage.setItem('unlockedLevels', JSON.stringify(nextUnlocked));
+          nextUnlocked.push(nextLevelId);
         }
+        if (!nextCleared.includes(s.currentLevel)) {
+          nextCleared.push(s.currentLevel);
+        }
+        localStorage.setItem('unlockedLevels', JSON.stringify(nextUnlocked));
+        localStorage.setItem('clearedLevels', JSON.stringify(nextCleared));
       }
-      
       return { 
         ...s, 
         selectingLevel: true, 
@@ -321,10 +373,47 @@ const App: React.FC = () => {
         score: 0,
         wave: 1,
         bossMode: false,
-        unlockedLevels: nextUnlocked
+        unlockedLevels: nextUnlocked,
+        clearedLevels: nextCleared,
+        shakeTime: 0
       };
     });
-  };
+  }, []);
+
+  const startNextLevel = useCallback(() => {
+    setGameState(s => {
+      const nextId = s.currentLevel + 1;
+      if (nextId > LEVELS.length) return { ...s, isVictory: false, selectingLevel: true, gameStarted: false };
+
+      let nextUnlocked = [...s.unlockedLevels];
+      let nextCleared = [...s.clearedLevels];
+      if (!nextUnlocked.includes(nextId)) nextUnlocked.push(nextId);
+      if (!nextCleared.includes(s.currentLevel)) nextCleared.push(s.currentLevel);
+      localStorage.setItem('unlockedLevels', JSON.stringify(nextUnlocked));
+      localStorage.setItem('clearedLevels', JSON.stringify(nextCleared));
+
+      return {
+        ...s,
+        currentLevel: nextId,
+        selectingLevel: false,
+        selectingCharacter: true, 
+        gameStarted: false,
+        isVictory: false,
+        isGameOver: false,
+        enemies: [],
+        bullets: [],
+        warnings: [],
+        skillEffects: [],
+        progress: 0,
+        score: s.score,
+        wave: 1,
+        bossMode: false,
+        unlockedLevels: nextUnlocked,
+        clearedLevels: nextCleared,
+        shakeTime: 0
+      };
+    });
+  }, []);
 
   return (
     <div className="relative w-screen h-screen bg-black overflow-hidden select-none">
@@ -334,6 +423,7 @@ const App: React.FC = () => {
         onSelectLevel={onSelectLevel} 
         onSelectCharacter={onSelectCharacter} 
         onBackToMenu={backToMenu} 
+        onStartNextLevel={startNextLevel}
         onTriggerSkill={handleSkillActivation}
         aiMessage="" 
       />

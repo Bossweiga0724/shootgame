@@ -67,7 +67,7 @@ export interface SpawnWarning extends Position {
 
 export interface SkillEffect extends Position {
   id: string;
-  type: 'EXPLOSION' | 'RING' | 'BEAM' | 'SHOCKWAVE' | 'DANGER_ROW';
+  type: 'EXPLOSION' | 'RING' | 'BEAM' | 'SHOCKWAVE' | 'DANGER_ROW' | 'ORBITAL_STRIKE';
   radius: number;
   maxRadius: number;
   color: string;
@@ -99,7 +99,7 @@ export interface GameState {
     fireRateModifier: number;
     skillCooldowns: { q: number; w: number; e: number };
     maxCooldowns: { q: number; w: number; e: number };
-    godMode: boolean; // 新增无敌模式标记
+    godMode: boolean;
   };
   enemies: Enemy[];
   bullets: Bullet[];
@@ -117,7 +117,9 @@ export interface GameState {
   selectingLevel: boolean;
   currentLevel: number;
   unlockedLevels: number[];
+  clearedLevels: number[]; // 新增：记录已通关的关卡
   achievements: Achievement[];
   recentAchievement?: string;
   bossMode: boolean;
+  shakeTime: number; // 屏幕抖动时间
 }
